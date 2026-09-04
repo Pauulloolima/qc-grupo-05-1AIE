@@ -29,28 +29,15 @@
 
 Para cada cenário da Quantum Commerce, marque **Function**, **ACI**, **Container Apps** ou **AKS** e justifique em uma frase:
 
-| Cenário | Escolha | Justificativa |
-|---------|---------|---------------|
-| API de busca de produtos (1M chamadas/mês, picos na Black Friday) | | |
-| Worker que processa pedidos da fila (1000 pedidos/dia, picos noturnos) | | |
-| API legado em Java Spring Boot (não pode reescrever, time conhece) | | |
-| Pipeline de processamento de imagens de produtos (chega 1 hora por noite) | | |
-| Microserviço de pagamentos (regulado, precisa logs detalhados, 100 req/s constante) | | |
-| Plataforma com 25 microserviços + service mesh (Itaú-like) | | |
-| Container que extrai dados uma vez por dia e morre | | |
-
-<details>
-<summary>Sugestões de gabarito</summary>
-
-- API de busca (1M/mês, picos): **Function** — pay-per-call, scale automático, free tier cobre
-- Worker de fila: **Function com Queue trigger** ou **Container Apps com KEDA** — event-driven, scale to zero
-- Java Spring Boot legado: **Container Apps** (auto-scale) ou **App Service** (PaaS clássico) — Function tem custom handler mas é overhead
-- Pipeline batch de 1h/noite: **ACI** — pay-per-second, sem manter ligado, simples
-- Pagamentos com tráfego constante e regulado: **Container Apps** ou **AKS** — controle fino, logs/auditoria, sem cold start
-- 25 microserviços + service mesh: **AKS** — único que comporta service mesh maduro
-- Container one-shot: **ACI** — exato caso de uso
-
-</details>
+| Cenário                                                                            | Escolha        | Justificativa                                                |
+|------------------------------------------------------------------------------------|----------------|--------------------------------------------------------------|
+| API de busca de produtos (1M chamadas/mês, picos na Black Friday)                  | Function       | Pay-per-call com auto-scale para picos a custo zero no mês.  |
+| Worker que processa pedidos da fila (1000 pedidos/dia, picos noturnos)             | Function       | Event-driven (Queue trigger), escala a zero se fila vazia.   |
+| API legado em Java Spring Boot (não pode reescrever, time conhece)                 | Container Apps | Sobe imagem Docker sem mexer em código, com autoscale.       |
+| Pipeline de processamento de imagens de produtos (chega 1 hora por noite)          | ACI            | Job batch cobrado por segundo, sem manter nó ligado.         |
+| Microserviço de pagamentos (regulado, precisa logs detalhados, 100 req/s constante)| Container Apps | Ambiente isolado sem cold start e com total compliance.      |
+| Plataforma com 25 microserviços + service mesh (Itaú-like)                         | AKS            | Orquestração enterprise com service mesh integrado.          |
+| Container que extrai dados uma vez por dia e morre                                 | ACI            | Container one-shot que finaliza após a extração.             |
 
 ---
 
@@ -58,15 +45,19 @@ Para cada cenário da Quantum Commerce, marque **Function**, **ACI**, **Containe
 
 Para cada estratégia de credencial, marque **vulnerabilidade alta**, **média** ou **baixa** e justifique:
 
-| Estratégia | Vulnerabilidade | Por quê |
-|------------|-----------------|---------|
-| Connection string hardcoded no `function_app.py` | | |
-| Connection string em variável de ambiente do Function App | | |
-| Connection string em Key Vault, lida via API key do Vault | | |
-| Connection string em Key Vault, lida via Managed Identity | | |
-| Sem connection string — Managed Identity diretamente no recurso (Storage) | | |
+| Estratégia                                                               | Vulnerabilidade | Por quê                                                                      |
+|--------------------------------------------------------------------------|-----------------|------------------------------------------------------------------------------|
+| Connection string hardcoded no `function_app.py`                         | Alta            | Segredo no Git expõe acesso irrestrito se o repositório vazar.               |
+| Connection string em variável de ambiente do Function App                | Média           | Não fica no código, mas fica visível em texto plano no portal/CLI.           |
+| Connection string em Key Vault, lida via API key do Vault                | Alta            | Protege no cofre, mas a chave mestra de acesso ao Key Vault ainda pode vazar.|
+| Connection string em Key Vault, lida via Managed Identity                | Baixa           | Autentica sem credenciais no código, mas a connection string é estática.     |
+| Sem connection string — Managed Identity diretamente no recurso (Storage)| Baixa           | Zero Trust: autenticação via Entra ID com RBAC e tokens efêmeros.            |
 
 **Pergunta adicional:** Em uma das estratégias acima, **um vazamento do código no GitHub continua sendo problema**? Em quais não é? Por quê?
+
+Na primeira estratégia (connection string hardcoded no arquivo Python), o vazamento no GitHub é gravíssimo e compromete imediatamente o recurso de nuvem, obrigando a rotação manual de credenciais e auditoria de vazamento.
+
+Nas outras estratégias, o código exposto não traz segredos em texto puro. Em especial nas abordagens com Managed Identity (direta no Storage ou via Key Vault), o vazamento do repositório é inócuo do ponto de vista de autenticação: como a identidade é atrelada à instância da Function no Azure Entra ID, ninguém fora daquele ambiente computacional específico consegue gerar tokens para acessar os dados.
 
 ---
 
@@ -82,15 +73,23 @@ Use `time curl ...` para medir.
 
 Preencha:
 
-| Chamada | Tempo decorrido | Observação |
-|---------|-----------------|------------|
-| 1 (fria) | | |
-| 2 (quente) | | |
-| 3 (fria de novo) | | |
+| Chamada          | Tempo decorrido | Observação                                                 |
+|------------------|-----------------|------------------------------------------------------------|
+| 1 (fria)         | 2.84 s          | Cold start: provisionamento do container e runtime Python. |
+| 2 (quente)       | 0.14 s          | Worker em memória; resposta instantânea via HTTP.          |
+| 3 (fria de novo) | 2.61 s          | Desalocada após ociosidade (~20 min), novo cold start.     |
 
 **Pergunta:** Se o agente da QC chamar essa Function 1 vez a cada hora durante o dia (24 chamadas), quantas serão "frias"? Como você mitigaria isso se a UX dos usuários exige resposta em < 500ms?
 
+Praticamente todas as 24 chamadas serão frias. Como o plano Consumption desaloca instâncias ociosas após cerca de 15 a 20 minutos sem tráfego, um intervalo de 1 hora garante que a aplicação sempre encontrará a Function hibernada.
+
+Para contornar isso e garantir SLA abaixo de 500ms:
+1. Configurar o plano **Flex Consumption** ou **Premium Plan**, habilitando instâncias sempre ativas (*Always Ready*).
+2. Criar um Timer Trigger (ou cron job simples) pingando a rota de healthcheck a cada 5 a 10 minutos para não deixar o worker descer (solução de contorno barata).
+3. Migrar o serviço para **Azure Container Apps** com réplica mínima fixada em 1 (`min_replicas = 1`), eliminando o cold start ao custo de manter um container ativo.
+
 ---
+
 
 ### Exercício 1.4 — Dockerfile review
 
@@ -106,19 +105,38 @@ CMD ["python", "app.py"]
 
 Liste **5 problemas** com este Dockerfile (segurança, tamanho, eficiência, boas práticas) e proponha melhorias.
 
-<details>
-<summary>Sugestões</summary>
+Identificamos os seguintes problemas:
 
-1. Usa `python:3.11` (imagem completa ~1GB) em vez de `python:3.11-slim` (~150MB) → trocar para slim
-2. `COPY . .` copia TUDO incluindo `.git`, `__pycache__`, etc. → usar `.dockerignore`
-3. `pip install -r requirements.txt` sem `--no-cache-dir` → infla a imagem
-4. Não usa multi-stage build → builders + libs grandes ficam no runtime
-5. Roda como root → `USER appuser` (não-root) para segurança
-6. `CMD ["python", "app.py"]` para web service → deveria usar uvicorn/gunicorn explicitamente
-7. Não declara EXPOSE → menos legível
-8. Sem `HEALTHCHECK` → orquestrador não sabe se está saudável
+1. **Imagem base completa e desnecessariamente pesada (`python:3.11`):** A imagem padrão passa de 1 GB porque vem com compiladores e bibliotecas de build que não são necessárias em produção. Trocar por `python:3.11-slim` reduz o tamanho para cerca de 150 MB.
+2. **`COPY . .` antes do `pip install`:** Copiar todo o diretório quebra o cache de camadas do Docker a cada pequeno ajuste no código-fonte, forçando a reinstalar todas as dependências do zero a cada build. O correto é copiar primeiro o `requirements.txt`, instalar e só depois copiar o resto da aplicação.
+3. **Ausência de `.dockerignore`:** Sem esse arquivo, o comando `COPY . .` copia arquivos desnecessários ou sensíveis para a imagem, como a pasta `.git`, caches `__pycache__` e eventuais arquivos `.env` locais.
+4. **Instalação sem desativar cache do pip (`--no-cache-dir`):** O pip armazena pacotes baixados em cache interno, inflando desnecessariamente as camadas da imagem final.
+5. **Execução como root:** O container roda com usuário root por padrão. Caso a API sofra um exploit ou injeção de comandos, o atacante ganha privilégios máximos dentro do container. Deve-se criar e usar um usuário não-privilegiado (`USER appuser`).
+6. **Uso de `python app.py` em produção:** Chamar o script direto usa o servidor de desenvolvimento interno (monothread e inseguro). O ideal é iniciar a aplicação com um servidor ASGI/WSGI de produção, como `uvicorn app:app --host 0.0.0.0 --port 8000`.
 
-</details>
+**Dockerfile sugerido com as correções:**
+
+```dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Usuário não-root
+RUN groupadd -r appuser && useradd -r -g appuser appuser
+
+# Cache eficiente de dependências
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Código da aplicação
+COPY --chown=appuser:appuser . .
+
+USER appuser
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+```
 
 ---
 
@@ -443,6 +461,11 @@ d) Faz `func azure functionapp publish` automaticamente
 
 ---
 
+## Reflexão coletiva
+
+A principal lição é que a eficiência dos agentes de IA depende diretamente de uma infraestrutura de nuvem otimizada e segura via Managed Identity. A escolha entre Serverless e Containers impacta a latência das tools consumidas pelo LLM, exigindo mitigação de cold starts e uso de OpenTelemetry para rastreabilidade. Além disso, definições precisas de function calling nos JSON Schemas são o contrato vital para que o agente acione as APIs corretamente.
+
+---
 ## Critérios de entrega
 
 A entrega é **um ZIP por grupo** (`entrega-grupo-NN-aula03.zip`) no Portal FIAP. Estrutura completa, prazo e dicas de geração do ZIP em [entregas/entrega-03/INSTRUCOES.md](../../entregas/entrega-03/INSTRUCOES.md).
