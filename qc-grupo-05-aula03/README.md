@@ -10,7 +10,7 @@ A estrutura de pastas reflete a arquitetura e a separação de responsabilidades
 
 ```text
 .
-├── entrega-05-aula03.md          # Documento principal com a resolução dos exercícios (N1, N2 e N3)
+├── entrega-grupo-05-aula03.md    # Documento principal com a resolução dos exercícios (N1, N2 e N3)
 ├── README.md                     # Este arquivo de instruções de execução
 ├── terraform/                    # Arquivos IaC para provisionamento no Azure (App, ACR, ACI, Storage, App Insights)
 ├── function/                     # Código Python das rotas Serverless (Catálogo de Produtos e Cálculo de Frete)
